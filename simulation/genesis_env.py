@@ -211,7 +211,7 @@ class HumanoidEnv:
             self.scene.add_entity(m, pos=pos)
         except Exception as e: print(f"[Env] add_object: {e}")
 
-    def _stabilize(self, angles, alpha=0.3):
+    def _stabilize(self, angles, alpha=0.5):
         legs = {"left_hip_yaw","left_hip_roll","left_hip_pitch","left_knee","left_ankle",
                 "right_hip_yaw","right_hip_roll","right_hip_pitch","right_knee","right_ankle","torso"}
         return {j: float(v*(1-(alpha*1.4 if j in legs else alpha*0.4)) +

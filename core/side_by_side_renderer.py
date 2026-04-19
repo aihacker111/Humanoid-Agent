@@ -94,7 +94,7 @@ class SideBySideRenderer:
         print(f"[Renderer] ✓ {self.frame_count} frames → {self.output_path.name} ({mb:.1f}MB)")
         return str(self.output_path)
 
-    # ── Panels ─────────────────────────────────────────────────────────────────
+    # ── Panels ──────────────────────────────────────────────────────────────────
 
     def _human_panel(self, frame, pose) -> np.ndarray:
         p = np.full((PANEL_H, PANEL_W, 3), PANEL_BG, dtype=np.uint8)
@@ -131,11 +131,7 @@ class SideBySideRenderer:
         return p
 
     def _robot_panel(self, frame, retargeted) -> np.ndarray:
-        """
-        Robot panel shows ONLY the real Genesis 3D render.
-        If frame is None (Genesis not available), shows a waiting message.
-        No 2D stick figures, no fake drawings.
-        """
+        """Robot panel: ONLY real Genesis 3D frame. No 2D drawing."""
         p = np.full((PANEL_H, PANEL_W, 3), PANEL_BG, dtype=np.uint8)
 
         # Header
@@ -152,12 +148,11 @@ class SideBySideRenderer:
 
         VY=36; VH=PANEL_H-36-44
 
-        # ── Show ONLY real Genesis 3D frame ────────────────────────────────
         has_frame = (
             frame is not None
             and hasattr(frame, 'shape')
             and frame.size > 0
-            and frame.mean() > 5   # not fully black
+            and frame.mean() > 5
         )
 
         if has_frame:
@@ -167,12 +162,9 @@ class SideBySideRenderer:
             resized = cv2.resize(frame, (nw,nh), interpolation=cv2.INTER_LINEAR)
             ox=(PANEL_W-nw)//2; oy=VY+(VH-nh)//2
             p[oy:oy+nh, ox:ox+nw] = resized
-
-            # Compact joint readout overlay on bottom-left of frame
             if retargeted:
                 self._joint_overlay(p, retargeted, ox+6, oy+nh-80)
         else:
-            # Genesis not available — simple waiting message, no fake drawing
             cy = VY + VH//2
             cv2.rectangle(p, (40, VY+40), (PANEL_W-40, VY+VH-40), DIVIDER_BG, 1)
             self._t(p, "Genesis 3D", PANEL_W//2, cy-20, TEXT_SEC, 0.7, cx=True)
@@ -180,7 +172,6 @@ class SideBySideRenderer:
             self._t(p, "(Genesis not installed or CPU render pending)",
                     PANEL_W//2, cy+32, TEXT_DIM, 0.32, cx=True)
 
-        # Bottom info
         iy = PANEL_H-36
         cv2.rectangle(p, (0,iy), (PANEL_W,PANEL_H), (20,35,30), -1)
         source = "Genesis 3D" if has_frame else "awaiting"
@@ -190,7 +181,7 @@ class SideBySideRenderer:
                     10, iy+22, TEXT_SEC, 0.38)
         return p
 
-    # ── Helpers ────────────────────────────────────────────────────────────────
+    # ── Helpers ──────────────────────────────────────────────────────────────────
 
     def _skeleton(self, panel, pose, ox, oy, nw, nh):
         def px(kp):
@@ -214,13 +205,12 @@ class SideBySideRenderer:
                 cv2.circle(panel, px(kp), 3, ACCENT_GOLD, -1, cv2.LINE_AA)
 
     def _joint_overlay(self, panel, retargeted, x, y):
-        """4 key joint angles overlaid on the Genesis frame."""
         angles = retargeted.joint_angles
         items = [
-            ("L.Elbow",  "left_elbow"),
-            ("R.Elbow",  "right_elbow"),
-            ("L.Knee",   "left_knee"),
-            ("R.Knee",   "right_knee"),
+            ("L.Elbow", "left_elbow"),
+            ("R.Elbow", "right_elbow"),
+            ("L.Knee",  "left_knee"),
+            ("R.Knee",  "right_knee"),
         ]
         ov = panel.copy()
         cv2.rectangle(ov, (x-3, y-14), (x+130, y+len(items)*15+2), (0,0,0), -1)
@@ -284,8 +274,7 @@ def create_comparison_video(session_id, source_video, robot_frames,
                              poses, retargeted_frames, task, metrics_list=None):
     out = f"outputs/videos/{session_id}_comparison.mp4"
     renderer = SideBySideRenderer(out, task=task)
-    renderer.add_title_card("Human Demo  vs  Unitree H1",
-                             f"Task: {task}", 2.0)
+    renderer.add_title_card("Human Demo  vs  Unitree H1", f"Task: {task}", 2.0)
     hf = _extract_frames(source_video, max(len(robot_frames), len(retargeted_frames)))
     renderer.write_batch(human_frames=hf, robot_frames=robot_frames,
                          poses=poses, retargeted=retargeted_frames,
