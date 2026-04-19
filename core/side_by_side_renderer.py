@@ -1,757 +1,311 @@
 """
 core/side_by_side_renderer.py — Professional comparison video renderer
-Design: publication-quality, dark theme, NeurIPS/AAAI paper style
+Robot panel: REAL Genesis 3D frame only. No 2D drawing.
 """
-import cv2
-import numpy as np
+import cv2, numpy as np
 from pathlib import Path
 from typing import Optional
-
-from models import HumanPose, Keypoint3D, RetargetedPose
+from models import HumanPose, RetargetedPose
 from config import config
 
-# ── Design constants ──────────────────────────────────────────────────────────
-W = 1280
-H = 720
-PANEL_W = 620
-PANEL_H = 580
-PANEL_Y = 80          # top offset for header
-INFO_H = 60           # bottom info bar height
-
-# Colors — dark professional theme
-C_BG         = (10,  10,  18)    # near-black background
-C_HEADER_BG  = (15,  15,  25)    # header
-C_PANEL_BG   = (18,  18,  30)    # panel background
-C_DIVIDER    = (40,  40,  60)    # subtle divider
-C_ACCENT_L   = (64,  186, 255)   # left accent — cyan (human)
-C_ACCENT_R   = (100, 220, 130)   # right accent — green (robot)
-C_ACCENT_W   = (255, 180,  60)   # warning/highlight — amber
-C_TEXT_PRI   = (230, 230, 240)   # primary text
-C_TEXT_SEC   = (130, 130, 155)   # secondary text
-C_TEXT_DIM   = (70,  70,  90)    # dim text
-C_SKELETON   = (64,  186, 255)   # skeleton cyan
-C_JOINT      = (255, 255, 255)   # joint dots
-C_HAND       = (255, 200,  80)   # hand landmarks amber
-
-FONT       = cv2.FONT_HERSHEY_SIMPLEX
-FONT_BOLD  = cv2.FONT_HERSHEY_DUPLEX
-FONT_MONO  = cv2.FONT_HERSHEY_PLAIN
-
-# Skeleton connections
-SKELETON_PAIRS = [
-    ("left_shoulder",  "right_shoulder"),
-    ("left_shoulder",  "left_elbow"),
-    ("left_elbow",     "left_wrist"),
-    ("right_shoulder", "right_elbow"),
-    ("right_elbow",    "right_wrist"),
-    ("left_shoulder",  "left_hip"),
-    ("right_shoulder", "right_hip"),
-    ("left_hip",       "right_hip"),
-    ("left_hip",       "left_knee"),
-    ("left_knee",      "left_ankle"),
-    ("right_hip",      "right_knee"),
-    ("right_knee",     "right_ankle"),
-    ("nose",           "left_shoulder"),
-    ("nose",           "right_shoulder"),
+W=1280; H=720; PANEL_W=620; PANEL_H=580; HEADER_H=60; FOOTER_H=80; DIVIDER_W=40
+BG=(18,18,24); PANEL_BG=(26,28,38); HEADER_BG=(12,14,20); DIVIDER_BG=(30,32,45)
+ACCENT_BLUE=(64,156,255); ACCENT_TEAL=(80,220,180); ACCENT_GOLD=(60,200,255)
+TEXT_PRI=(230,235,245); TEXT_SEC=(130,140,160); TEXT_DIM=(70,80,100)
+SUCCESS=(80,200,120); WARNING=(80,180,255); DANGER=(80,80,220)
+FONT=cv2.FONT_HERSHEY_SIMPLEX
+BONES=[
+    ("left_shoulder","right_shoulder"),
+    ("left_shoulder","left_elbow"),("left_elbow","left_wrist"),
+    ("right_shoulder","right_elbow"),("right_elbow","right_wrist"),
+    ("left_shoulder","left_hip"),("right_shoulder","right_hip"),
+    ("left_hip","right_hip"),
+    ("left_hip","left_knee"),("left_knee","left_ankle"),
+    ("right_hip","right_knee"),("right_knee","right_ankle"),
 ]
 
 
 class SideBySideRenderer:
-    """
-    Professional comparison video renderer.
-    Layout:
-      ┌────────────────────────────────────────────┐
-      │  [Header bar — title + model info]          │ 80px
-      ├──────────────────┬─────┬───────────────────┤
-      │  Human Demo      │  │  │  Unitree H1       │ 580px
-      │  (video+skeleton)│  │  │  (robot HUD)      │
-      ├──────────────────┴─────┴───────────────────┤
-      │  [Metrics bar — live scores + timeline]     │ 60px
-      └────────────────────────────────────────────┘
-    """
-
-    def __init__(self, output_path: str, task: str = "", fps: float = 15.0):
+    def __init__(self, output_path, task="", fps=15.0,
+                 paper_title="LLM-Guided Kinematic Retargeting"):
         self.output_path = Path(output_path)
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        self.task = task
-        self.fps = fps
+        self.task = task; self.fps = fps; self.paper_title = paper_title
         self.frame_count = 0
-        self.total_frames = 0   # set later for progress bar
-        self._metric_history: list[dict] = []
-
+        self._nat = 0.0; self._bal = 0.0; self._coord = 0.0; self._falls = 0
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        self.writer = cv2.VideoWriter(
-            str(self.output_path), fourcc, self.fps, (W, H)
-        )
-        print(f"[Renderer] Output: {self.output_path} ({W}x{H} @ {fps}fps)")
+        self.writer = cv2.VideoWriter(str(self.output_path), fourcc, fps, (W, H))
+        print(f"[Renderer] Output: {self.output_path}  ({W}×{H} @ {fps}fps)")
 
-    def set_total_frames(self, n: int):
-        self.total_frames = n
+    def write_frame(self, human_frame=None, robot_frame=None,
+                    human_pose=None, retargeted_pose=None, metrics=None):
+        if metrics:
+            self._nat   = float(metrics.get("naturalness",   self._nat))
+            self._bal   = float(metrics.get("balance",       self._bal))
+            self._coord = float(metrics.get("coordination",  self._coord))
+            self._falls = int(metrics.get("fall_count",      self._falls))
 
-    def write_frame(
-        self,
-        human_frame: Optional[np.ndarray],
-        robot_frame: Optional[np.ndarray],
-        human_pose: Optional[HumanPose] = None,
-        retargeted_pose: Optional[RetargetedPose] = None,
-        extra_metrics: dict = None,
-    ):
-        canvas = self._make_canvas()
-        self._draw_header(canvas)
-        self._draw_human_panel(canvas, human_frame, human_pose)
-        self._draw_robot_panel(canvas, robot_frame, retargeted_pose)
-        self._draw_divider(canvas)
-        self._draw_metrics_bar(canvas, retargeted_pose, extra_metrics)
-        self._draw_progress(canvas)
-
+        canvas = np.full((H, W, 3), BG, dtype=np.uint8)
+        self._header(canvas)
+        canvas[HEADER_H:HEADER_H+PANEL_H, 0:PANEL_W] = \
+            self._human_panel(human_frame, human_pose)
+        self._divider(canvas)
+        canvas[HEADER_H:HEADER_H+PANEL_H, PANEL_W+DIVIDER_W:PANEL_W+DIVIDER_W+PANEL_W] = \
+            self._robot_panel(robot_frame, retargeted_pose)
+        self._footer(canvas)
         self.writer.write(canvas)
         self.frame_count += 1
 
-        # Track metric history for trend lines
-        if retargeted_pose:
-            self._metric_history.append({
-                "balance": retargeted_pose.balance_score,
-                "error": retargeted_pose.retargeting_error,
-            })
-
-    def write_batch(
-        self,
-        human_frames: list,
-        robot_frames: list,
-        poses: list = None,
-        retargeted: list = None,
-        metrics_list: list = None,
-    ):
-        self.set_total_frames(max(len(human_frames), len(robot_frames)))
-        n = min(len(human_frames), len(robot_frames))
+    def write_batch(self, human_frames, robot_frames,
+                    poses=None, retargeted=None, metrics_list=None):
+        n = max(len(human_frames), len(robot_frames) if robot_frames else 0)
         for i in range(n):
+            hf = human_frames[i] if i < len(human_frames) else None
+            rf = robot_frames[i] if robot_frames and i < len(robot_frames) else None
             self.write_frame(
-                human_frame=human_frames[i],
-                robot_frame=robot_frames[i],
+                human_frame=hf, robot_frame=rf,
                 human_pose=poses[i] if poses and i < len(poses) else None,
                 retargeted_pose=retargeted[i] if retargeted and i < len(retargeted) else None,
-                extra_metrics=metrics_list[i] if metrics_list and i < len(metrics_list) else None,
+                metrics=metrics_list[i] if metrics_list and i < len(metrics_list) else None,
             )
-        print(f"[Renderer] Wrote {n} frames")
 
-    def add_title_card(
-        self,
-        title: str,
-        subtitle: str = "",
-        duration_seconds: float = 2.0,
-    ):
-        """Professional title card with gradient-like effect."""
+    def add_title_card(self, title, subtitle="", duration_seconds=2.0):
         n = int(duration_seconds * self.fps)
-        for fi in range(n):
-            alpha = min(1.0, fi / max(int(self.fps * 0.3), 1))  # fade in
-            canvas = self._make_canvas()
-
-            # Center content
-            self._draw_title_text(canvas, title, subtitle, alpha)
-            self._draw_corner_accents(canvas, alpha)
-
-            self.writer.write(canvas)
+        for _ in range(n):
+            c = np.full((H, W, 3), BG, dtype=np.uint8)
+            my = H // 2
+            cv2.line(c, (120, my-60), (W-120, my-60), DIVIDER_BG, 1)
+            cv2.line(c, (120, my+60), (W-120, my+60), DIVIDER_BG, 1)
+            for x in [120, W//2, W-120]:
+                cv2.circle(c, (x, my-60), 3, ACCENT_BLUE, -1)
+                cv2.circle(c, (x, my+60), 3, ACCENT_TEAL, -1)
+            self._t(c, self.paper_title.upper(), W//2, my-90, TEXT_DIM, 0.42, cx=True)
+            self._t(c, title, W//2, my-18, TEXT_PRI, 1.0, th=2, cx=True)
+            if subtitle:
+                self._t(c, subtitle, W//2, my+28, TEXT_SEC, 0.52, cx=True)
+            model = config.openrouter.reasoning_model.split("/")[-1]
+            self._t(c, f"Model: {model}", W//2, my+86, TEXT_DIM, 0.38, cx=True)
+            self.writer.write(c)
+            self.frame_count += 1
 
     def finalize(self) -> str:
         self.writer.release()
-        size_mb = self.output_path.stat().st_size / 1e6
-        print(f"[Renderer] Finalized: {self.frame_count} frames → "
-              f"{self.output_path} ({size_mb:.1f} MB)")
+        mb = self.output_path.stat().st_size / 1e6
+        print(f"[Renderer] ✓ {self.frame_count} frames → {self.output_path.name} ({mb:.1f}MB)")
         return str(self.output_path)
 
-    # ── Canvas construction ────────────────────────────────────────────────────
+    # ── Panels ─────────────────────────────────────────────────────────────────
 
-    def _make_canvas(self) -> np.ndarray:
-        canvas = np.full((H, W, 3), C_BG, dtype=np.uint8)
-        return canvas
-
-    def _draw_header(self, canvas: np.ndarray):
-        """Top header bar with title and model info."""
-        cv2.rectangle(canvas, (0, 0), (W, PANEL_Y - 2), C_HEADER_BG, -1)
-        cv2.line(canvas, (0, PANEL_Y - 2), (W, PANEL_Y - 2), C_DIVIDER, 1)
-
-        # Paper title (left)
-        title = "LLM-Guided Kinematic Retargeting"
-        cv2.putText(canvas, title, (20, 30), FONT_BOLD, 0.65, C_TEXT_PRI, 1)
-
-        # Task (center)
-        task_short = self.task[:55] + "..." if len(self.task) > 55 else self.task
-        task_display = f"Task: {task_short}"
-        tw = cv2.getTextSize(task_display, FONT, 0.45, 1)[0][0]
-        cv2.putText(canvas, task_display, (W//2 - tw//2, 55),
-                    FONT, 0.45, C_TEXT_SEC, 1)
-
-        # Model badge (right)
-        model = config.openrouter.reasoning_model.split("/")[-1]
-        badge_text = f"  {model}  "
-        bw = cv2.getTextSize(badge_text, FONT, 0.40, 1)[0][0]
-        bx = W - bw - 20
-        cv2.rectangle(canvas, (bx - 4, 14), (bx + bw + 4, 36),
-                      (30, 50, 80), -1)
-        cv2.rectangle(canvas, (bx - 4, 14), (bx + bw + 4, 36),
-                      C_ACCENT_L, 1)
-        cv2.putText(canvas, badge_text, (bx, 30),
-                    FONT, 0.40, C_ACCENT_L, 1)
-
-        # Frame counter (right, below badge)
-        fc_text = f"Frame {self.frame_count:04d}"
-        cv2.putText(canvas, fc_text, (W - 110, 56),
-                    FONT_MONO, 0.9, C_TEXT_DIM, 1)
-
-    def _draw_human_panel(
-        self,
-        canvas: np.ndarray,
-        frame: Optional[np.ndarray],
-        pose: Optional[HumanPose],
-    ):
-        """Left panel: human video with clean skeleton overlay."""
-        px, py = 10, PANEL_Y
-        pw, ph = PANEL_W, PANEL_H
-
-        # Panel background
-        cv2.rectangle(canvas, (px, py), (px + pw, py + ph), C_PANEL_BG, -1)
-        cv2.rectangle(canvas, (px, py), (px + pw, py + ph), C_DIVIDER, 1)
-
-        # Video frame
-        if frame is not None and frame.size > 0:
-            fh_orig, fw_orig = frame.shape[:2]
-            inner_w, inner_h = pw - 2, ph - 40
-            img = self._fit_frame(frame, inner_w, inner_h)
-            ih, iw = img.shape[:2]
-            ix = px + 1 + (inner_w - iw) // 2
-            iy = py + 1
-
-            # Skeleton: MediaPipe coords are normalized to the *source* frame, not the letterbox
-            if pose:
-                img = self._draw_skeleton_on(
-                    img, pose, iw, ih, fw_orig, fh_orig
-                )
-
-            canvas[iy:iy + ih, ix:ix + iw] = img
-        else:
-            # No frame — show placeholder
-            cx, cy = px + pw // 2, py + ph // 2 - 20
-            cv2.putText(canvas, "No video frame", (cx - 70, cy),
-                        FONT, 0.5, C_TEXT_DIM, 1)
-
-        # Panel label bar (bottom of panel)
-        label_y = py + ph - 38
-        cv2.rectangle(canvas, (px, label_y), (px + pw, py + ph),
-                      (12, 20, 35), -1)
-        cv2.line(canvas, (px, label_y), (px + pw, label_y), C_ACCENT_L, 2)
-
-        # Left accent stripe
-        cv2.rectangle(canvas, (px, py), (px + 3, py + ph), C_ACCENT_L, -1)
-
-        # Label
-        cv2.putText(canvas, "HUMAN DEMONSTRATION",
-                    (px + 14, py + ph - 18), FONT_BOLD, 0.50, C_ACCENT_L, 1)
-
-        # Mode badge
+    def _human_panel(self, frame, pose) -> np.ndarray:
+        p = np.full((PANEL_H, PANEL_W, 3), PANEL_BG, dtype=np.uint8)
+        cv2.rectangle(p, (0,0), (PANEL_W,36), (20,22,35), -1)
+        cv2.rectangle(p, (0,0), (4,36), ACCENT_BLUE, -1)
+        self._t(p, "HUMAN DEMONSTRATION", 14, 23, ACCENT_BLUE, 0.5)
         if pose:
             mode = pose.dominant_mode.value.upper()
-            mode_colors = {
-                "LOCOMOTION":   (255, 140,  50),
-                "MANIPULATION": (100, 200, 255),
-                "WHOLE_BODY":   (180, 100, 255),
-            }
-            mc = mode_colors.get(mode, C_TEXT_SEC)
-            mw = cv2.getTextSize(mode, FONT, 0.38, 1)[0][0]
-            mx = px + pw - mw - 18
-            cv2.rectangle(canvas, (mx - 6, py + ph - 32),
-                          (mx + mw + 6, py + ph - 12), (20, 20, 30), -1)
-            cv2.rectangle(canvas, (mx - 6, py + ph - 32),
-                          (mx + mw + 6, py + ph - 12), mc, 1)
-            cv2.putText(canvas, mode, (mx, py + ph - 17),
-                        FONT, 0.38, mc, 1)
+            mc = {"LOCOMOTION":(255,140,50),"MANIPULATION":ACCENT_BLUE,
+                  "WHOLE_BODY":ACCENT_TEAL}.get(mode, TEXT_SEC)
+            bw = len(mode)*8+16; bx = PANEL_W-bw-8
+            cv2.rectangle(p, (bx,6), (PANEL_W-8,30), mc, 1)
+            self._t(p, mode, bx+8, 23, mc, 0.38)
 
-    def _draw_robot_panel(
-        self,
-        canvas: np.ndarray,
-        frame: Optional[np.ndarray],
-        retargeted: Optional[RetargetedPose],
-    ):
-        """Right panel: robot HUD with joint visualization."""
-        px = W - PANEL_W - 10
-        py = PANEL_Y
-        pw, ph = PANEL_W, PANEL_H
-
-        # Panel background
-        cv2.rectangle(canvas, (px, py), (px + pw, py + ph), C_PANEL_BG, -1)
-        cv2.rectangle(canvas, (px, py), (px + pw, py + ph), C_DIVIDER, 1)
-
-        # Try real robot frame first
-        has_real_frame = (
-            frame is not None and frame.size > 0 and frame.mean() > 15
-        )
-
-        if has_real_frame:
-            img = self._fit_frame(frame, pw - 2, ph - 40)
-            ih, iw = img.shape[:2]
-            ix = px + 1 + (pw - 2 - iw) // 2
-            iy = py + 1
-            canvas[iy:iy + ih, ix:ix + iw] = img
+        VY=36; VH=PANEL_H-36-36
+        if frame is not None and frame.size > 0:
+            fh,fw = frame.shape[:2]
+            scale = min(PANEL_W/fw, VH/fh)
+            nw,nh = int(fw*scale), int(fh*scale)
+            resized = cv2.resize(frame, (nw,nh))
+            ox=(PANEL_W-nw)//2; oy=VY+(VH-nh)//2
+            p[oy:oy+nh, ox:ox+nw] = resized
+            if pose:
+                self._skeleton(p, pose, ox, oy, nw, nh)
         else:
-            # Professional robot HUD visualization
-            self._draw_robot_hud(canvas, px, py, pw, ph, retargeted)
+            self._t(p, "No video frame", PANEL_W//2, VY+VH//2, TEXT_DIM, 0.5, cx=True)
 
-        # Panel label bar
-        label_y = py + ph - 38
-        cv2.rectangle(canvas, (px, label_y), (px + pw, py + ph),
-                      (12, 30, 20), -1)
-        cv2.line(canvas, (px, label_y), (px + pw, label_y), C_ACCENT_R, 2)
+        iy = PANEL_H-36
+        cv2.rectangle(p, (0,iy), (PANEL_W,PANEL_H), (20,22,35), -1)
+        if pose:
+            lh = len(pose.left_hand) > 0; rh = len(pose.right_hand) > 0
+            self._t(p, f"Body:{len(pose.body)}kpts  L.Hand:{lh}  R.Hand:{rh}  Moving:{pose.is_moving}",
+                    10, iy+22, TEXT_SEC, 0.36)
+        return p
 
-        # Right accent stripe
-        cv2.rectangle(canvas, (px + pw - 3, py),
-                      (px + pw, py + ph), C_ACCENT_R, -1)
+    def _robot_panel(self, frame, retargeted) -> np.ndarray:
+        """
+        Robot panel shows ONLY the real Genesis 3D render.
+        If frame is None (Genesis not available), shows a waiting message.
+        No 2D stick figures, no fake drawings.
+        """
+        p = np.full((PANEL_H, PANEL_W, 3), PANEL_BG, dtype=np.uint8)
 
-        cv2.putText(canvas, "UNITREE H1  ·  GENESIS SIMULATION",
-                    (px + 14, py + ph - 18), FONT_BOLD, 0.50, C_ACCENT_R, 1)
-
-        # Balance score mini-bar
+        # Header
+        cv2.rectangle(p, (0,0), (PANEL_W,36), (20,35,30), -1)
+        cv2.rectangle(p, (0,0), (4,36), ACCENT_TEAL, -1)
+        self._t(p, "UNITREE H1  —  GENESIS 3D SIM", 14, 23, ACCENT_TEAL, 0.5)
         if retargeted:
             b = retargeted.balance_score
-            bar_x = px + pw - 120
-            bar_y = py + ph - 30
-            bar_w = 100
-            cv2.rectangle(canvas, (bar_x, bar_y),
-                          (bar_x + bar_w, bar_y + 10), (20, 35, 25), -1)
-            fill_color = C_ACCENT_R if b > 0.6 else C_ACCENT_W
-            cv2.rectangle(canvas, (bar_x, bar_y),
-                          (bar_x + int(bar_w * b), bar_y + 10),
-                          fill_color, -1)
-            cv2.putText(canvas, f"BAL {b:.2f}",
-                        (bar_x - 52, bar_y + 9), FONT, 0.38, C_TEXT_SEC, 1)
+            bc = SUCCESS if b>0.7 else WARNING if b>0.4 else DANGER
+            badge = f"BAL {b:.0%}"
+            bx = PANEL_W - len(badge)*8 - 24
+            cv2.rectangle(p, (bx,6), (PANEL_W-8,30), bc, 1)
+            self._t(p, badge, bx+8, 23, bc, 0.38)
 
-    def _draw_robot_hud(
-        self,
-        canvas: np.ndarray,
-        px: int, py: int, pw: int, ph: int,
-        retargeted: Optional[RetargetedPose],
-    ):
-        """
-        Professional robot HUD when Genesis can't render.
-        Shows stick figure + joint angle bars + status.
-        """
-        cx = px + pw // 2
-        cy = py + ph // 2 - 30
+        VY=36; VH=PANEL_H-36-44
 
-        # ── Stick figure robot ─────────────────────────────────────────────
-        angles = retargeted.joint_angles if retargeted else {}
-
-        # Get joint angles to animate figure
-        l_elbow = angles.get("left_elbow", 0.4)
-        r_elbow = angles.get("right_elbow", 0.4)
-        l_sp = angles.get("left_shoulder_pitch", 0.0)
-        r_sp = angles.get("right_shoulder_pitch", 0.0)
-        l_knee = angles.get("left_knee", 0.62)
-        r_knee = angles.get("right_knee", 0.62)
-
-        # Scale for figure
-        scale = 80
-        lw = 2   # line width
-
-        # Head
-        cv2.circle(canvas, (cx, cy - scale - 15), 18,
-                   C_ACCENT_R, 2)
-        # Visor line (robot face)
-        cv2.line(canvas, (cx - 10, cy - scale - 12),
-                 (cx + 10, cy - scale - 12), C_ACCENT_R, 2)
-
-        # Torso
-        torso_top = (cx, cy - scale + 5)
-        torso_bot = (cx, cy)
-        cv2.line(canvas, torso_top, torso_bot, C_ACCENT_R, lw + 1)
-
-        # Shoulders
-        l_shoulder = (cx - 35, cy - scale + 15)
-        r_shoulder = (cx + 35, cy - scale + 15)
-        cv2.line(canvas, l_shoulder, r_shoulder, C_ACCENT_R, lw)
-
-        # Left arm (animated)
-        import math
-        la_len = 45
-        la_angle = -math.pi/2 - l_sp - 0.3
-        l_elbow_pos = (
-            int(l_shoulder[0] + la_len * math.cos(la_angle)),
-            int(l_shoulder[1] + la_len * math.sin(la_angle)),
+        # ── Show ONLY real Genesis 3D frame ────────────────────────────────
+        has_frame = (
+            frame is not None
+            and hasattr(frame, 'shape')
+            and frame.size > 0
+            and frame.mean() > 5   # not fully black
         )
-        cv2.line(canvas, l_shoulder, l_elbow_pos, C_ACCENT_R, lw)
 
-        la2_angle = la_angle + l_elbow + 0.3
-        l_wrist_pos = (
-            int(l_elbow_pos[0] + la_len * 0.85 * math.cos(la2_angle)),
-            int(l_elbow_pos[1] + la_len * 0.85 * math.sin(la2_angle)),
-        )
-        cv2.line(canvas, l_elbow_pos, l_wrist_pos, C_ACCENT_R, lw)
+        if has_frame:
+            fh,fw = frame.shape[:2]
+            scale = min(PANEL_W/fw, VH/fh)
+            nw,nh = int(fw*scale), int(fh*scale)
+            resized = cv2.resize(frame, (nw,nh), interpolation=cv2.INTER_LINEAR)
+            ox=(PANEL_W-nw)//2; oy=VY+(VH-nh)//2
+            p[oy:oy+nh, ox:ox+nw] = resized
 
-        # Right arm (animated, mirrored)
-        ra_angle = -math.pi/2 + r_sp + 0.3
-        r_elbow_pos = (
-            int(r_shoulder[0] + la_len * math.cos(ra_angle)),
-            int(r_shoulder[1] + la_len * math.sin(ra_angle)),
-        )
-        cv2.line(canvas, r_shoulder, r_elbow_pos, C_ACCENT_R, lw)
+            # Compact joint readout overlay on bottom-left of frame
+            if retargeted:
+                self._joint_overlay(p, retargeted, ox+6, oy+nh-80)
+        else:
+            # Genesis not available — simple waiting message, no fake drawing
+            cy = VY + VH//2
+            cv2.rectangle(p, (40, VY+40), (PANEL_W-40, VY+VH-40), DIVIDER_BG, 1)
+            self._t(p, "Genesis 3D", PANEL_W//2, cy-20, TEXT_SEC, 0.7, cx=True)
+            self._t(p, "render unavailable", PANEL_W//2, cy+8, TEXT_DIM, 0.42, cx=True)
+            self._t(p, "(Genesis not installed or CPU render pending)",
+                    PANEL_W//2, cy+32, TEXT_DIM, 0.32, cx=True)
 
-        ra2_angle = ra_angle - r_elbow - 0.3
-        r_wrist_pos = (
-            int(r_elbow_pos[0] + la_len * 0.85 * math.cos(ra2_angle)),
-            int(r_elbow_pos[1] + la_len * 0.85 * math.sin(ra2_angle)),
-        )
-        cv2.line(canvas, r_elbow_pos, r_wrist_pos, C_ACCENT_R, lw)
-
-        # Hips
-        l_hip = (cx - 20, cy)
-        r_hip = (cx + 20, cy)
-        cv2.line(canvas, l_hip, r_hip, C_ACCENT_R, lw)
-
-        # Legs (animated)
-        ll_len = 55
-        ll_angle = math.pi/2 + min(l_knee * 0.3, 0.4)
-        l_knee_pos = (
-            int(l_hip[0] - 8 + ll_len * math.cos(math.pi/2 + 0.1)),
-            int(l_hip[1] + ll_len * math.sin(math.pi/2 + 0.1)),
-        )
-        cv2.line(canvas, l_hip, l_knee_pos, C_ACCENT_R, lw)
-        l_ankle_pos = (
-            int(l_knee_pos[0] + ll_len * math.cos(math.pi/2 - ll_angle * 0.2)),
-            int(l_knee_pos[1] + ll_len * math.sin(math.pi/2 - ll_angle * 0.2)),
-        )
-        cv2.line(canvas, l_knee_pos, l_ankle_pos, C_ACCENT_R, lw)
-
-        rr_angle = math.pi/2 + min(r_knee * 0.3, 0.4)
-        r_knee_pos = (
-            int(r_hip[0] + 8 + ll_len * math.cos(math.pi/2 - 0.1)),
-            int(r_hip[1] + ll_len * math.sin(math.pi/2 - 0.1)),
-        )
-        cv2.line(canvas, r_hip, r_knee_pos, C_ACCENT_R, lw)
-        r_ankle_pos = (
-            int(r_knee_pos[0] + ll_len * math.cos(math.pi/2 + rr_angle * 0.2)),
-            int(r_knee_pos[1] + ll_len * math.sin(math.pi/2 + rr_angle * 0.2)),
-        )
-        cv2.line(canvas, r_knee_pos, r_ankle_pos, C_ACCENT_R, lw)
-
-        # Joint dots
-        for pt in [l_shoulder, r_shoulder, l_elbow_pos, r_elbow_pos,
-                   l_wrist_pos, r_wrist_pos, l_hip, r_hip,
-                   l_knee_pos, r_knee_pos]:
-            cv2.circle(canvas, pt, 4, (30, 30, 50), -1)
-            cv2.circle(canvas, pt, 4, C_ACCENT_R, 1)
-
-        # Ground line
-        ground_y = py + ph - 60
-        cv2.line(canvas, (px + 20, ground_y), (px + pw - 20, ground_y),
-                 C_DIVIDER, 1)
-
-        # ── Joint angle bars (right side) ──────────────────────────────────
-        bar_x = px + pw - 200
-        bar_y_start = py + 30
-        bar_w = 150
-        bar_h = 10
-
-        key_joints = [
-            ("L.Shoulder", "left_shoulder_pitch",  (-3.14, 3.14)),
-            ("R.Shoulder", "right_shoulder_pitch", (-3.14, 3.14)),
-            ("L.Elbow",    "left_elbow",            (-1.57, 1.57)),
-            ("R.Elbow",    "right_elbow",            (-1.57, 1.57)),
-            ("L.Knee",     "left_knee",              (-0.26, 2.05)),
-            ("R.Knee",     "right_knee",             (-0.26, 2.05)),
-            ("Torso",      "torso",                  (-2.35, 2.35)),
-        ]
-
-        cv2.putText(canvas, "JOINT ANGLES (rad)",
-                    (bar_x, bar_y_start - 10), FONT, 0.36, C_TEXT_DIM, 1)
-
-        for i, (label, joint, (lo, hi)) in enumerate(key_joints):
-            val = angles.get(joint, 0.0)
-            by = bar_y_start + i * 26
-
-            # Label
-            cv2.putText(canvas, label, (bar_x, by + 8),
-                        FONT_MONO, 0.80, C_TEXT_SEC, 1)
-
-            # Track
-            tx = bar_x + 75
-            cv2.rectangle(canvas, (tx, by), (tx + bar_w, by + bar_h),
-                          (25, 25, 40), -1)
-
-            # Zero marker
-            zero_x = tx + int(bar_w * (-lo) / (hi - lo))
-            cv2.line(canvas, (zero_x, by - 2), (zero_x, by + bar_h + 2),
-                     C_TEXT_DIM, 1)
-
-            # Value bar
-            norm = (val - lo) / (hi - lo)
-            norm = max(0.0, min(1.0, norm))
-            fill_x = int(bar_w * norm)
-            bar_color = C_ACCENT_R if abs(val) < (hi * 0.7) else C_ACCENT_W
-            cv2.rectangle(canvas, (tx, by), (tx + fill_x, by + bar_h),
-                          bar_color, -1)
-
-            # Value text
-            cv2.putText(canvas, f"{val:+.2f}",
-                        (tx + bar_w + 6, by + 8),
-                        FONT_MONO, 0.75, C_TEXT_SEC, 1)
-
-        # ── Status badges ───────────────────────────────────────────────────
-        status_y = py + ph - 110
+        # Bottom info
+        iy = PANEL_H-36
+        cv2.rectangle(p, (0,iy), (PANEL_W,PANEL_H), (20,35,30), -1)
+        source = "Genesis 3D" if has_frame else "awaiting"
         if retargeted:
-            tags = [
-                (f"BAL:{retargeted.balance_score:.2f}",
-                 C_ACCENT_R if retargeted.balance_score > 0.6 else C_ACCENT_W),
-                (f"REACH:{retargeted.reachability_score:.2f}", C_ACCENT_L),
-                (f"ERR:{retargeted.retargeting_error:.3f}", C_TEXT_SEC),
-            ]
-            tx = px + 14
-            for tag, color in tags:
-                tw = cv2.getTextSize(tag, FONT, 0.38, 1)[0][0]
-                cv2.rectangle(canvas, (tx - 4, status_y - 12),
-                              (tx + tw + 4, status_y + 4),
-                              (20, 20, 35), -1)
-                cv2.rectangle(canvas, (tx - 4, status_y - 12),
-                              (tx + tw + 4, status_y + 4), color, 1)
-                cv2.putText(canvas, tag, (tx, status_y),
-                            FONT, 0.38, color, 1)
-                tx += tw + 18
+            self._t(p, f"Reach:{retargeted.reachability_score:.2f}  "
+                       f"DOF:{len(retargeted.joint_angles)}  [{source}]",
+                    10, iy+22, TEXT_SEC, 0.38)
+        return p
 
-        # Model watermark bottom-left of panel
-        cv2.putText(canvas, "LLM-Retargeted  ·  No Training",
-                    (px + 14, py + ph - 50), FONT, 0.35, C_TEXT_DIM, 1)
+    # ── Helpers ────────────────────────────────────────────────────────────────
 
-    def _draw_divider(self, canvas: np.ndarray):
-        """Center vertical divider with VS label."""
-        dx = W // 2
-        cv2.line(canvas, (dx, PANEL_Y), (dx, PANEL_Y + PANEL_H),
-                 C_DIVIDER, 1)
-        # VS badge
-        vs_y = PANEL_Y + PANEL_H // 2
-        cv2.rectangle(canvas, (dx - 18, vs_y - 14),
-                      (dx + 18, vs_y + 14), C_BG, -1)
-        cv2.rectangle(canvas, (dx - 18, vs_y - 14),
-                      (dx + 18, vs_y + 14), C_DIVIDER, 1)
-        cv2.putText(canvas, "VS", (dx - 11, vs_y + 5),
-                    FONT_BOLD, 0.50, C_TEXT_DIM, 1)
-
-    def _draw_metrics_bar(
-        self,
-        canvas: np.ndarray,
-        retargeted: Optional[RetargetedPose],
-        extra: Optional[dict],
-    ):
-        """Bottom metrics bar with live scores."""
-        by = PANEL_Y + PANEL_H + 2
-        bh = H - by
-
-        cv2.rectangle(canvas, (0, by), (W, H), C_HEADER_BG, -1)
-        cv2.line(canvas, (0, by), (W, by), C_DIVIDER, 1)
-
-        # Metric items
-        metrics = []
-        if retargeted:
-            metrics += [
-                ("Naturalness", extra.get("naturalness", 0.0) if extra else 0.0,
-                 C_ACCENT_L),
-                ("Balance", retargeted.balance_score, C_ACCENT_R),
-                ("Ret.Error", 1.0 - retargeted.retargeting_error, C_ACCENT_W),
-            ]
-        if extra:
-            if "stability" in extra:
-                metrics.append(("Stability", extra["stability"], C_ACCENT_R))
-
-        # Draw metric items evenly spaced
-        item_w = W // max(len(metrics) + 2, 5)
-        for i, (label, val, color) in enumerate(metrics):
-            ix = 20 + i * (item_w + 10)
-            iy = by + 8
-
-            # Mini bar
-            bar_w = 80
-            cv2.rectangle(canvas, (ix, iy + 14),
-                          (ix + bar_w, iy + 22), (25, 25, 40), -1)
-            cv2.rectangle(canvas, (ix, iy + 14),
-                          (ix + int(bar_w * max(0, min(1, val))), iy + 22),
-                          color, -1)
-
-            cv2.putText(canvas, label, (ix, iy + 10),
-                        FONT, 0.38, C_TEXT_SEC, 1)
-            cv2.putText(canvas, f"{val:.2f}", (ix + bar_w + 4, iy + 22),
-                        FONT_MONO, 0.90, color, 1)
-
-        # Frame counter (right)
-        fc = f"Frame {self.frame_count:04d}"
-        if self.total_frames > 0:
-            fc += f" / {self.total_frames:04d}"
-        cv2.putText(canvas, fc, (W - 180, by + 30),
-                    FONT_MONO, 1.0, C_TEXT_DIM, 1)
-
-    def _draw_progress(self, canvas: np.ndarray):
-        """Thin progress timeline at very bottom."""
-        if self.total_frames <= 0:
-            return
-        prog = self.frame_count / self.total_frames
-        py = H - 4
-        cv2.rectangle(canvas, (0, py), (W, H), C_DIVIDER, -1)
-        cv2.rectangle(canvas, (0, py),
-                      (int(W * prog), H), C_ACCENT_L, -1)
-
-    def _draw_title_text(
-        self,
-        canvas: np.ndarray,
-        title: str,
-        subtitle: str,
-        alpha: float,
-    ):
-        """Title card content."""
-        # Subtle grid pattern
-        for x in range(0, W, 40):
-            cv2.line(canvas, (x, 0), (x, H), (15, 15, 25), 1)
-        for y in range(0, H, 40):
-            cv2.line(canvas, (0, y), (W, y), (15, 15, 25), 1)
-
-        # Accent lines
-        acc_y = H // 2 - 50
-        cv2.line(canvas, (W//4, acc_y - 1), (3*W//4, acc_y - 1),
-                 C_ACCENT_L, 1)
-        cv2.line(canvas, (W//4, acc_y + 80), (3*W//4, acc_y + 80),
-                 C_ACCENT_R, 1)
-
-        # Main title
-        tw = cv2.getTextSize(title, FONT_BOLD, 1.1, 2)[0][0]
-        tx = (W - tw) // 2
-        color_t = tuple(int(c * alpha) for c in C_TEXT_PRI)
-        cv2.putText(canvas, title, (tx, acc_y + 40),
-                    FONT_BOLD, 1.1, color_t, 2)
-
-        # Subtitle
-        if subtitle:
-            sw = cv2.getTextSize(subtitle, FONT, 0.60, 1)[0][0]
-            sx = (W - sw) // 2
-            color_s = tuple(int(c * alpha) for c in C_TEXT_SEC)
-            cv2.putText(canvas, subtitle, (sx, acc_y + 72),
-                        FONT, 0.60, color_s, 1)
-
-        # Corner labels
-        color_c = tuple(int(c * alpha) for c in C_ACCENT_L)
-        color_cr = tuple(int(c * alpha) for c in C_ACCENT_R)
-        cv2.putText(canvas, "HUMAN DEMO", (60, H//2 + 140),
-                    FONT, 0.50, color_c, 1)
-        cv2.putText(canvas, "UNITREE H1", (W - 200, H//2 + 140),
-                    FONT, 0.50, color_cr, 1)
-
-    def _draw_corner_accents(self, canvas: np.ndarray, alpha: float):
-        """Decorative corner brackets."""
-        size = 30
-        thick = 2
-        color = tuple(int(c * alpha) for c in C_DIVIDER)
-        corners = [(20, 20), (W - 20, 20), (20, H - 20), (W - 20, H - 20)]
-        dirs = [(1, 1), (-1, 1), (1, -1), (-1, -1)]
-        for (cx, cy), (dx, dy) in zip(corners, dirs):
-            cv2.line(canvas, (cx, cy), (cx + dx * size, cy), color, thick)
-            cv2.line(canvas, (cx, cy), (cx, cy + dy * size), color, thick)
-
-    # ── Skeleton drawing ───────────────────────────────────────────────────────
-
-    def _draw_skeleton_on(
-        self,
-        img: np.ndarray,
-        pose: HumanPose,
-        letterbox_w: int,
-        letterbox_h: int,
-        orig_w: int,
-        orig_h: int,
-    ) -> np.ndarray:
-        """
-        Draw skeleton overlay. Landmarks are normalized to the original frame (orig_w × orig_h);
-        the panel image is letterboxed to (letterbox_w × letterbox_h), so map into the
-        inner content rectangle, not the full letterbox.
-        """
-        out = img.copy()
-        ox, oy, nw, nh = self._letterbox_content_rect(
-            orig_w, orig_h, letterbox_w, letterbox_h
-        )
-
-        def px_py(kp: Keypoint3D) -> tuple[int, int]:
-            return (ox + int(kp.x * nw), oy + int(kp.y * nh))
-
-        # Bones
-        for a_name, b_name in SKELETON_PAIRS:
-            a = pose.body.get(a_name)
-            b = pose.body.get(b_name)
-            if a and b and a.visibility > 0.4 and b.visibility > 0.4:
-                pa, pb = px_py(a), px_py(b)
-                cv2.line(out, pa, pb, C_SKELETON, 2)
-
-        # Body joints
+    def _skeleton(self, panel, pose, ox, oy, nw, nh):
+        def px(kp):
+            x = max(ox, min(ox+nw-1, ox + int(kp.x * nw)))
+            y = max(oy, min(oy+nh-1, oy + int(kp.y * nh)))
+            return (x, y)
+        for a, b in BONES:
+            ka, kb = pose.body.get(a), pose.body.get(b)
+            if ka and kb and ka.visibility > 0.4 and kb.visibility > 0.4:
+                cv2.line(panel, px(ka), px(kb), (60,210,90), 2, cv2.LINE_AA)
         for name, kp in pose.body.items():
             if kp.visibility > 0.5:
-                cx, cy = px_py(kp)
-                cv2.circle(out, (cx, cy), 5, (15, 20, 30), -1)
-                cv2.circle(out, (cx, cy), 5, C_SKELETON, 1)
-
-        # Hand landmarks (smaller)
+                pt = px(kp)
+                key = any(j in name for j in
+                          ["shoulder","elbow","wrist","hip","knee","ankle"])
+                r = 6 if key else 3
+                cv2.circle(panel, pt, r, (100,255,120) if key else (60,170,80), -1, cv2.LINE_AA)
+                cv2.circle(panel, pt, r, (220,255,225), 1, cv2.LINE_AA)
         for kps in [pose.left_hand.values(), pose.right_hand.values()]:
             for kp in kps:
-                cx, cy = px_py(kp)
-                cv2.circle(out, (cx, cy), 2, C_HAND, -1)
+                cv2.circle(panel, px(kp), 3, ACCENT_GOLD, -1, cv2.LINE_AA)
 
-        return out
+    def _joint_overlay(self, panel, retargeted, x, y):
+        """4 key joint angles overlaid on the Genesis frame."""
+        angles = retargeted.joint_angles
+        items = [
+            ("L.Elbow",  "left_elbow"),
+            ("R.Elbow",  "right_elbow"),
+            ("L.Knee",   "left_knee"),
+            ("R.Knee",   "right_knee"),
+        ]
+        ov = panel.copy()
+        cv2.rectangle(ov, (x-3, y-14), (x+130, y+len(items)*15+2), (0,0,0), -1)
+        cv2.addWeighted(ov, 0.55, panel, 0.45, 0, panel)
+        for i, (label, joint) in enumerate(items):
+            val = angles.get(joint, 0.0)
+            deg = round(val * 57.3, 1)
+            color = ACCENT_GOLD if abs(val) > 0.3 else TEXT_SEC
+            self._t(panel, f"{label}: {deg:+.1f}°", x, y+i*15, color, 0.34)
 
-    # ── Utilities ──────────────────────────────────────────────────────────────
+    def _header(self, c):
+        cv2.rectangle(c, (0,0), (W,HEADER_H), HEADER_BG, -1)
+        cv2.line(c, (0,HEADER_H-1), (W,HEADER_H-1), DIVIDER_BG, 1)
+        self._t(c, self.paper_title.upper(), 16, 20, TEXT_DIM, 0.42)
+        task = self.task[:70]+"..." if len(self.task)>70 else self.task
+        self._t(c, f"Task: {task}", W//2, 20, ACCENT_GOLD, 0.44, cx=True)
+        model = config.openrouter.reasoning_model.split("/")[-1]
+        self._t(c, f"Frame {self.frame_count:04d}  |  {model}", W-16, 20, TEXT_DIM, 0.38, rt=True)
+        self._t(c, "Human Demo", 16, 44, ACCENT_BLUE, 0.42)
+        self._t(c, "vs", W//2, 44, TEXT_DIM, 0.4, cx=True)
+        self._t(c, "Unitree H1 (Genesis 3D)", W-16, 44, ACCENT_TEAL, 0.42, rt=True)
+
+    def _footer(self, c):
+        y0 = HEADER_H + PANEL_H
+        cv2.rectangle(c, (0,y0), (W,H), HEADER_BG, -1)
+        cv2.line(c, (0,y0), (W,y0), DIVIDER_BG, 1)
+        items = [("Naturalness",self._nat,ACCENT_BLUE),
+                 ("Balance",    self._bal,ACCENT_TEAL),
+                 ("Coordination",self._coord,ACCENT_GOLD)]
+        bw = (W-80)//3-20
+        for i,(label,val,color) in enumerate(items):
+            x = 40+i*(bw+20); my = y0+22
+            self._t(c, label.upper(), x, my, TEXT_DIM, 0.36)
+            self._t(c, f"{val:.0%}", x+bw-4, my, color, 0.44, rt=True)
+            by = my+8
+            cv2.rectangle(c, (x,by), (x+bw,by+10), (35,38,50), -1)
+            cv2.rectangle(c, (x,by), (x+bw,by+10), (50,55,70), 1)
+            fw2 = int(bw*np.clip(val,0,1))
+            if fw2 > 0: cv2.rectangle(c, (x,by), (x+fw2,by+10), color, -1)
+        fc = DANGER if self._falls > 0 else SUCCESS
+        self._t(c, f"Falls: {self._falls}", W-40, y0+50, fc, 0.45, rt=True)
+        self._t(c, f"Step {self.frame_count:04d}", 40, y0+50, TEXT_DIM, 0.38)
+
+    def _divider(self, c):
+        x0=PANEL_W; y0=HEADER_H; y1=y0+PANEL_H
+        cv2.rectangle(c, (x0,y0), (x0+DIVIDER_W,y1), DIVIDER_BG, -1)
+        mx=x0+DIVIDER_W//2; my=y0+PANEL_H//2
+        self._t(c, "VS", mx, my-8, TEXT_SEC, 0.5, cx=True)
+        for dy in [-40,-20,20,40]:
+            cv2.circle(c, (mx,my+dy), 2, TEXT_DIM, -1)
 
     @staticmethod
-    def _letterbox_content_rect(
-        orig_w: int, orig_h: int, target_w: int, target_h: int
-    ) -> tuple[int, int, int, int]:
-        """Match `_fit_frame`: offsets (ox,oy) and content size (nw,nh) inside target canvas."""
-        if orig_w <= 0 or orig_h <= 0:
-            return 0, 0, target_w, target_h
-        scale = min(target_w / orig_w, target_h / orig_h)
-        nw, nh = int(orig_w * scale), int(orig_h * scale)
-        ox = (target_w - nw) // 2
-        oy = (target_h - nh) // 2
-        return ox, oy, nw, nh
-
-    @staticmethod
-    def _fit_frame(
-        frame: np.ndarray, target_w: int, target_h: int
-    ) -> np.ndarray:
-        """Resize frame maintaining aspect ratio with black letterbox."""
-        if frame is None or frame.size == 0:
-            return np.zeros((target_h, target_w, 3), dtype=np.uint8)
-
-        fh, fw = frame.shape[:2]
-        scale = min(target_w / fw, target_h / fh)
-        nw, nh = int(fw * scale), int(fh * scale)
-        resized = cv2.resize(frame, (nw, nh))
-
-        canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
-        ox = (target_w - nw) // 2
-        oy = (target_h - nh) // 2
-        canvas[oy:oy + nh, ox:ox + nw] = resized
-        return canvas
+    def _t(img, text, x, y, color, scale, th=1, cx=False, rt=False):
+        (tw,_),_ = cv2.getTextSize(text, FONT, scale, th)
+        if cx: x -= tw//2
+        elif rt: x -= tw
+        cv2.putText(img, text, (x,y), FONT, scale, color, th, cv2.LINE_AA)
 
 
-def _extract_video_frames(
-    video_path: str, n_frames: int
-) -> list[np.ndarray]:
-    """Extract n evenly-spaced frames from a video."""
+def create_comparison_video(session_id, source_video, robot_frames,
+                             poses, retargeted_frames, task, metrics_list=None):
+    out = f"outputs/videos/{session_id}_comparison.mp4"
+    renderer = SideBySideRenderer(out, task=task)
+    renderer.add_title_card("Human Demo  vs  Unitree H1",
+                             f"Task: {task}", 2.0)
+    hf = _extract_frames(source_video, max(len(robot_frames), len(retargeted_frames)))
+    renderer.write_batch(human_frames=hf, robot_frames=robot_frames,
+                         poses=poses, retargeted=retargeted_frames,
+                         metrics_list=metrics_list)
+    return renderer.finalize()
+
+
+def _extract_frames(video_path, n):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        return [np.zeros((480, 640, 3), dtype=np.uint8)] * n_frames
-
+        return [None] * n
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    step = max(1, total // max(n_frames, 1))
-    frames, count = [], 0
-
-    while len(frames) < n_frames:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    step = max(1, total // max(n, 1))
+    frames = []; count = 0
+    while len(frames) < n:
+        ret, f = cap.read()
+        if not ret: break
         count += 1
-        if count % step == 0:
-            frames.append(frame)
-
+        if count % step == 0: frames.append(f)
     cap.release()
-    if frames and len(frames) < n_frames:
-        frames += [frames[-1]] * (n_frames - len(frames))
-    return frames[:n_frames]
+    if frames and len(frames) < n:
+        frames += [frames[-1]] * (n - len(frames))
+    return frames[:n] if frames else [None] * n

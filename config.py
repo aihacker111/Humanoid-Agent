@@ -35,16 +35,14 @@ _load_env()
 class OpenRouterConfig:
     api_key: str = os.getenv("OPENROUTER_API_KEY", "your-api-key-here")
     base_url: str = "https://openrouter.ai/api/v1"
-    vision_model: str = "qwen/qwen3.6-plus"
-    reasoning_model: str = "anthropic/claude-sonnet-4.6"
-    fast_model: str = "anthropic/claude-sonnet-4.6"
+    vision_model: str = "qwen/qwen2.5-vl-72b-instruct"
+    reasoning_model: str = "anthropic/claude-sonnet-4-6"
+    fast_model: str = "anthropic/claude-sonnet-4-6"
 
 
 @dataclass
 class HumanoidConfig:
     model_name: str = "unitree_h1"
-    """Label shown in comparison video / UI (simulation still loads MJCF from model_name)."""
-    display_name: str = "Unitree H1"
     total_dof: int = 27
     locomotion_joints: list = field(default_factory=lambda: [
         "left_hip_yaw", "left_hip_roll", "left_hip_pitch",
@@ -87,14 +85,8 @@ class SimulationConfig:
     backend: str = "cpu"
     dt: float = 0.02
     gravity: tuple = (0, 0, -9.81)
-    show_viewer: bool = False       # False for Colab; True = interactive 3D window (needs display)
+    show_viewer: bool = False       # False for Colab
     max_episode_steps: int = 500
-    # Headless 3D RGB for videos: Genesis camera + Rasterizer (see simulation/genesis_env.py)
-    offscreen_camera: bool = True
-    camera_res: tuple = (640, 480)
-    camera_pos: tuple = (2.8, 0.0, 1.15)
-    camera_lookat: tuple = (0.0, 0.0, 0.92)
-    camera_fov: float = 42.0
 
 
 @dataclass

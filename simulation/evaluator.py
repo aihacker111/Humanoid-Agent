@@ -22,11 +22,6 @@ class PaperEvaluator:
         self.video_judge = VideoUnderstandingAgent()
         self.results: list[SimulationResult] = []
         self._human_frames: list[np.ndarray] = []   # Set by pipeline
-        self._last_sim_frames: list[np.ndarray] = []
-
-    def get_last_sim_frames(self) -> list[np.ndarray]:
-        """RGB frames from Genesis during the last evaluate_skill_sequence (may be empty)."""
-        return self._last_sim_frames
 
     def set_human_frames(self, frames: list[np.ndarray]):
         """
@@ -51,12 +46,10 @@ class PaperEvaluator:
 
         trajectory = [f.joint_angles for f in retargeted.frames]
         if not trajectory:
-            self._last_sim_frames = []
             return self._empty_result(skill_sequence, retargeted)
 
         # Execute simulation
         sim_frames = env.execute_sequence(trajectory, render_frames=True)
-        self._last_sim_frames = list(sim_frames) if sim_frames else []
         sim_metrics = env.get_metrics()
 
         # ── Naturalness: judge human frames (reliable) ────────────────────────
@@ -82,11 +75,10 @@ class PaperEvaluator:
         # ── Success: stable execution = success for manipulation tasks ─────────
         is_manipulation = not skill_sequence.requires_locomotion
         if is_manipulation:
-            # Standing tasks: no falls; stability uses lenient threshold because
-            # base_height from sim can be borderline when retarget motion is arm-heavy.
+            # For standing manipulation, success = robot stayed upright
             task_success = (
                 sim_metrics["fall_count"] == 0
-                and gait_stability > 0.35
+                and gait_stability > 0.5
             )
         else:
             task_success = sim_metrics["goal_reached"]

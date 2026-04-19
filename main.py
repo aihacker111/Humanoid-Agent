@@ -33,7 +33,7 @@ from models import RetargetedSequence
 from simulation.genesis_env import HumanoidEnv
 from simulation.evaluator import PaperEvaluator
 from core.trajectory_recorder import TrajectoryRecorder, TrajectoryPlayer
-from core.side_by_side_renderer import SideBySideRenderer
+from core.side_by_side_renderer import SideBySideRenderer, create_comparison_video
 
 
 def run_pipeline(
@@ -180,13 +180,8 @@ def run_pipeline(
     # ── Step 5: Simulation & evaluation ───────────────────────────────────────
     print("\nStep 5 / 5 — Genesis simulation & paper evaluation")
 
-    # Pass human frames so evaluator can judge naturalness (same timecodes as retargeting)
-    n_eval = min(10, len(retargeted_frames))
-    eval_nums = [
-        retargeted_frames[i].source_human_pose.frame_number
-        for i in range(n_eval)
-    ]
-    human_frames_for_eval = _extract_frames_by_frame_numbers(source, eval_nums)
+    # Pass human frames so evaluator can judge naturalness properly
+    human_frames_for_eval = _extract_frames_for_render(source, min(10, len(retargeted_frames)))
     evaluator.set_human_frames(human_frames_for_eval)
 
     result = evaluator.evaluate_skill_sequence(
@@ -196,34 +191,27 @@ def run_pipeline(
         source_video=source,
     )
 
-    sim_frames = evaluator.get_last_sim_frames()
-
     # ── Generate side-by-side comparison video ────────────────────────────────
     print("\n[Pipeline] Generating side-by-side comparison video...")
     renderer.add_title_card(
-        title=f"Human Demo  vs  {config.humanoid.display_name}",
+        title="Human Demo  vs  Unitree H1",
         subtitle=f"Task: {task}",
         duration_seconds=1.5,
     )
 
-    # Human pixels aligned with pose extraction frame indices (not uniform subsampling)
-    frame_nums = [f.source_human_pose.frame_number for f in retargeted_frames]
-    human_frames_raw = _extract_frames_by_frame_numbers(source, frame_nums)
-    renderer.set_total_frames(len(retargeted_frames))
+    # Re-extract human frames aligned with retargeted sequence
+    human_frames_raw = _extract_frames_for_render(source, len(retargeted_frames))
 
     for i, (h_frame, r_pose) in enumerate(zip(human_frames_raw, retargeted_frames)):
         human_pose = poses[i] if i < len(poses) else None
-        if i < len(sim_frames) and sim_frames[i] is not None and sim_frames[i].size > 0:
-            robot_frame = sim_frames[i]
-        else:
-            robot_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        robot_frame = np.zeros((480, 640, 3), dtype=np.uint8)  # placeholder if no sim frame
 
         renderer.write_frame(
             human_frame=h_frame,
             robot_frame=robot_frame,
             human_pose=human_pose,
             retargeted_pose=r_pose,
-            extra_metrics={
+            extra_info={
                 "naturalness": round(result.motion_naturalness, 2),
                 "stability":   round(result.gait_stability, 2),
             },
@@ -296,7 +284,6 @@ def run_benchmark(source: str, show_viewer: bool = False):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _extract_frames_for_render(video_path: str, n: int) -> list:
-    """Evenly subsample frames (legacy helper; prefer _extract_frames_by_frame_numbers)."""
     import numpy as np
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -315,32 +302,6 @@ def _extract_frames_for_render(video_path: str, n: int) -> list:
     if frames and len(frames) < n:
         frames += [frames[-1]] * (n - len(frames))
     return frames[:n]
-
-
-def _extract_frames_by_frame_numbers(video_path: str, frame_numbers: list) -> list:
-    """
-    Grab specific frames by 1-based index (matches PoseExtractionAgent frame_number).
-    Required so skeleton overlay matches the HumanPose used for each retargeted frame.
-    """
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return [np.zeros((480, 640, 3), dtype=np.uint8)] * len(frame_numbers)
-
-    out = []
-    fallback = None
-    for fn in frame_numbers:
-        idx = max(0, int(fn) - 1)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ret, frame = cap.read()
-        if ret and frame is not None:
-            fallback = frame
-            out.append(frame)
-        elif fallback is not None:
-            out.append(fallback.copy())
-        else:
-            out.append(np.zeros((480, 640, 3), dtype=np.uint8))
-    cap.release()
-    return out
 
 
 def _download_youtube(url: str) -> str:
@@ -374,17 +335,13 @@ if __name__ == "__main__":
     parser.add_argument("--benchmark", action="store_true",
                         help="Run full benchmark suite for paper")
     parser.add_argument("--show-viewer", action="store_true",
-                        help="Open Genesis interactive 3D viewer (needs a display)")
-    parser.add_argument("--no-offscreen-camera", action="store_true",
-                        help="Disable headless 3D camera; comparison video uses 2D HUD fallback")
+                        help="Show Genesis 3D viewer")
     parser.add_argument("--max-frames", type=int, default=50,
                         help="Max frames to process (for quick testing)")
     parser.add_argument("--debug", action="store_true")
 
     args = parser.parse_args()
     config.debug = args.debug
-    if args.no_offscreen_camera:
-        config.simulation.offscreen_camera = False
 
     if args.benchmark:
         run_benchmark(args.source, show_viewer=args.show_viewer)
