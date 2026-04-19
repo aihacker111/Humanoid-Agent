@@ -1,0 +1,20 @@
+# Core
+httpx>=0.27.0
+pydantic>=2.0.0
+numpy>=1.26.0
+opencv-python>=4.9.0
+python-dotenv>=1.0.0
+
+# Pose Estimation — Tasks API (0.10.14+)
+mediapipe>=0.10.14
+
+# Robot Simulation
+genesis-world>=0.2.0          # pip install genesis-world
+# Alternative: pip install mujoco dm_control
+
+# Video
+yt-dlp>=2024.1.0
+
+# API
+fastapi>=0.110.0
+uvicorn>=0.29.0
