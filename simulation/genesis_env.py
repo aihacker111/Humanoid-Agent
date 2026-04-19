@@ -186,8 +186,9 @@ class HumanoidEnv:
             if render_frames:
                 orbit = (i / max(len(trajectory)-1, 1)) * 30
                 frames.append(self.render_frame(orbit_deg=orbit))
-            if done:
-                if obs.get("has_fallen"): self.metrics["fall_count"] += 1
+            if obs.get("has_fallen"):
+                self.metrics["fall_count"] += 1
+            if self.step_count >= config.simulation.max_episode_steps:
                 break
         s = self.metrics["gait_stability"]
         self.metrics["gait_stability"] = float(np.mean(s)) if s else 0.0
@@ -211,7 +212,7 @@ class HumanoidEnv:
             self.scene.add_entity(m, pos=pos)
         except Exception as e: print(f"[Env] add_object: {e}")
 
-    def _stabilize(self, angles, alpha=0.5):
+    def _stabilize(self, angles, alpha=0.7):
         legs = {"left_hip_yaw","left_hip_roll","left_hip_pitch","left_knee","left_ankle",
                 "right_hip_yaw","right_hip_roll","right_hip_pitch","right_knee","right_ankle","torso"}
         return {j: float(v*(1-(alpha*1.4 if j in legs else alpha*0.4)) +

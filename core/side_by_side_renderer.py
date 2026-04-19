@@ -152,7 +152,7 @@ class SideBySideRenderer:
             frame is not None
             and hasattr(frame, 'shape')
             and frame.size > 0
-            and frame.mean() > 5
+            and frame.mean() > 0.5
         )
 
         if has_frame:
