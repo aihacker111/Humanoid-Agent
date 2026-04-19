@@ -266,6 +266,9 @@ class RetargetingAgent:
             for i, pose in enumerate(poses):
                 if i < len(batch_data):
                     d = batch_data[i]
+                    if not isinstance(d, dict):
+                        results.append(self._fallback(pose))
+                        continue
                     angles = self._clamp(d.get("joint_angles", {}))
                     if not angles:
                         angles = NEUTRAL_POSE.copy()
