@@ -250,7 +250,7 @@ if __name__ == "__main__":
     parser.add_argument("--use-library", action="store_true")
     parser.add_argument("--benchmark",   action="store_true")
     parser.add_argument("--show-viewer", action="store_true")
-    parser.add_argument("--max-frames",  type=int, default=50)
+    parser.add_argument("--max-frames",  type=int, default=100)
     parser.add_argument("--debug",       action="store_true")
     args = parser.parse_args()
     config.debug = args.debug
