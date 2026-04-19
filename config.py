@@ -35,9 +35,9 @@ _load_env()
 class OpenRouterConfig:
     api_key: str = os.getenv("OPENROUTER_API_KEY", "your-api-key-here")
     base_url: str = "https://openrouter.ai/api/v1"
-    vision_model: str = "qwen/qwen2.5-vl-72b-instruct"
-    reasoning_model: str = "anthropic/claude-sonnet-4-6"
-    fast_model: str = "anthropic/claude-sonnet-4-6"
+    vision_model: str = "qwen/qwen3.6-plus"
+    reasoning_model: str = "anthropic/claude-sonnet-4.6"
+    fast_model: str = "anthropic/claude-sonnet-4.6"
 
 
 @dataclass
